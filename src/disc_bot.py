@@ -112,7 +112,6 @@ async def first_prompt(chat_session: genai.chats.Chat, file_path: str):
     for sentence in sentences:
         await generate_prompt(chat_session, sentence)
 
-
 def parse_single_preference(ai_output: str) -> Dict[str, any]:
     lines = ai_output.strip().split("\n")
     user_data = {}
@@ -271,7 +270,6 @@ async def ask_cities(traveler_data: Dict[int, Traveler]):
     except Exception as e:
         print(f"Error generating city suggestions: {e}")
         return None    
-
 
 async def create_city_poll(channel: discord.TextChannel, suggestions: List[str], traveler_ids: List[int]):
     """
