@@ -1,9 +1,8 @@
 import discord
 from google import genai
+import asyncio
 import re
 from typing import Dict, List
-
-parallel_mode: bool = False
 
 PROMPT_FILENAME = "prompt.txt"
 
@@ -97,7 +96,7 @@ def parse_single_preference(ai_output: str) -> Dict[str, any]:
     return {"aspects": user_data, "deal_breakers": deal_breakers if deal_breakers is not None else [], "deal_makers": deal_makers if deal_makers is not None else []}
 
 async def ask_next_question(user_id: int, latest_answer: str = ""):
-    global travelers, chats, users_to_ask, start_trip_message, parallel_mode
+    global travelers, chats, users_to_ask, start_trip_message
 
     if user_id not in chats:
         print(f"Error: Chat session not found for user {travelers[user_id].username}")
@@ -113,13 +112,12 @@ async def ask_next_question(user_id: int, latest_answer: str = ""):
         prompt = "GO!"
         await first_prompt(chat_session, PROMPT_FILENAME)
         traveler.conversation_history.append({"role": "model", "content": "Instructions sent."})
-        prompt = "GO!" # The actual first question
 
     ai_response = await generate_prompt(chat_session, prompt)
     traveler.conversation_history.append({"role": "model", "content": ai_response})
 
     user = discord_client.get_user(user_id)
-    if user:
+    if user and "DONE!" not in ai_response:
         await user.send(ai_response)
 
     if "DONE!" in ai_response:
@@ -139,14 +137,18 @@ async def ask_next_question(user_id: int, latest_answer: str = ""):
             del chats[user_id]
             if user_id in users_to_ask:
                 users_to_ask.remove(user_id)
+                
             if not users_to_ask and start_trip_message:
                 await start_trip_message.channel.send("All users have finished their preference gathering.")
                 await trigger_dummy_procedure()
-            elif not parallel_mode and users_to_ask: # Start next user in sequential mode
+                
+            elif users_to_ask: # Start next user in sequential mode
                 genai_client = genai.Client(api_key=GEMINI_API_KEY) # Restart chat
-                next_user_id = users_to_ask[0]
-                chats[next_user_id] = genai_client.chats.create(model="gemini-2.0-flash")
-                await ask_next_question(next_user_id)
+                await asyncio.sleep(60) # Introduce 1 minute delay
+                if users_to_ask:
+                    next_user_id = users_to_ask[0]
+                    chats[next_user_id] = genai_client.chats.create(model="gemini-2.0-flash")
+                    await ask_next_question(next_user_id)
         return None
     else:
         return ai_response
@@ -177,7 +179,7 @@ async def on_ready():
 
 @discord_client.event
 async def on_message(message):
-    global parallel_mode, users_to_ask, trip_started, travelers, chats, start_trip_message
+    global users_to_ask, trip_started, travelers, chats, start_trip_message
 
     if message.author == discord_client.user:
         return
@@ -198,32 +200,15 @@ async def on_message(message):
         else:
             await message.channel.send("Cannot add users after the trip has started. Use '!start_trip' to begin.")
 
-    elif message.content.startswith('!set_mode'):
-        mode = message.content.split()[1].lower()
-        if mode == 'parallel':
-            parallel_mode = True
-            await message.channel.send("Set to parallel mode (asking all users concurrently).")
-        elif mode == 'sequential':
-            parallel_mode = False
-            await message.channel.send("Set to sequential mode (asking one user at a time).")
-        else:
-            await message.channel.send("Invalid mode. Use 'parallel' or 'sequential'.")
-
     elif message.content.startswith('!start_trip'):
         if users_to_ask:
             trip_started = True
             start_trip_message = message
-            await message.channel.send(f"Starting preference gathering in {'parallel' if parallel_mode else 'sequential'} mode.")
-            if parallel_mode:
-                chats = {user_id: genai_client.chats.create(model="gemini-2.0-flash") for user_id in users_to_ask}
-                for user_id in users_to_ask:
-                    await ask_next_question(user_id)
-            else:
-                if users_to_ask:
-                    genai_client = genai.Client(api_key=GEMINI_API_KEY) # Restart chat
-                    first_user_id = users_to_ask[0]
-                    chats[first_user_id] = genai_client.chats.create(model="gemini-2.0-flash")
-                    await ask_next_question(first_user_id)
+            await message.channel.send(f"Starting preference gathering from users.")
+            if users_to_ask:
+                first_user_id = users_to_ask[0]
+                chats[first_user_id] = genai_client.chats.create(model="gemini-2.0-flash")
+                await ask_next_question(first_user_id)
         else:
             await message.channel.send("Please add users to the trip using '!add_user' before starting.")
             
