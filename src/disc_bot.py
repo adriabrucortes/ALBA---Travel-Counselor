@@ -17,22 +17,22 @@ intents.members = True
 discord_client = discord.Client(intents=intents)
 
 class Traveler:
-    def __init__(self, user_id: int, username: str):
-        self.user_id = user_id
-        self.username = username
-        self.budget: int = None
+    def __init__(self, _user_id: int, _username: str):
+        self._user_id = _user_id
+        self._username = _username
+        self.cheap: int = None
         self.history: int = None
         self.environmental_impact: int = None
         self.food: int = None
         self.deal_breakers: List[str] = []
         self.deal_makers: List[str] = []
-        self.conversation_history: List[Dict[str, str]] = []
-        self.done: bool = False
+        self._conversation_history: List[Dict[str, str]] = []
+        self._done: bool = False
 
     def __str__(self):
-        output = f"{self.username}:\n"
-        if self.budget is not None:
-            output += f" budget, {self.budget}\n"
+        output = f"{self._username}:\n"
+        if self.cheap is not None:
+            output += f" cheap, {self.cheap}\n"
         if self.history is not None:
             output += f" history, {self.history}\n"
         if self.environmental_impact is not None:
@@ -51,6 +51,19 @@ chats: Dict[int, genai.chats.Chat] = {}
 trip_started: bool = False
 start_trip_message: discord.Message = None
 
+def get_traveler_preference_attributes(traveler_class):
+    """
+    Returns a list of preference attribute names from the Traveler class,
+    excluding those that start with an underscore.
+    """
+    preference_attributes = []
+    temp_traveler = traveler_class(_user_id=0, _username="")
+    excluded_attributes = ['deal_breakers', 'deal_makers']
+    for attr_name in temp_traveler.__dict__:
+        if not attr_name.startswith('_') and attr_name not in excluded_attributes and not callable(getattr(temp_traveler, attr_name)):
+            preference_attributes.append(attr_name)
+    return preference_attributes
+
 async def generate_prompt(chat_session: genai.chats.Chat, prompt: str) -> str:
     try:
         response = chat_session.send_message(prompt)
@@ -67,6 +80,16 @@ async def first_prompt(chat_session: genai.chats.Chat, file_path: str):
         await generate_prompt(chat_session, f"Error: File not found at '{file_path}'")
         return
 
+    preference_attributes = get_traveler_preference_attributes(Traveler)
+
+    aspects_text = "Aspects:\n"
+    for attr in preference_attributes:
+        aspects_text += f"- {attr}\n"
+
+    full_prompt = f"{initial_prompt_content}\n\n{aspects_text}\n\n"
+    
+    await generate_prompt(chat_session, full_prompt)
+
     sentences = [s.strip() + '.' for s in initial_prompt_content.split('.') if s.strip()]
 
     await generate_prompt(chat_session, "I'm going to send you a series of instructions you need to understand and you must not reply until I say GO!")
@@ -76,9 +99,9 @@ async def first_prompt(chat_session: genai.chats.Chat, file_path: str):
 
 
 def parse_single_preference(ai_output: str) -> Dict[str, any]:
-    data = {}
+    #data = {}
     lines = ai_output.strip().split("\n")
-    username_line = lines[0].strip().rstrip(":")
+    #username_line = lines[0].strip().rstrip(":")
     user_data = {}
     deal_breakers = None
     deal_makers = None
@@ -95,48 +118,56 @@ def parse_single_preference(ai_output: str) -> Dict[str, any]:
             user_data[aspect] = value
     return {"aspects": user_data, "deal_breakers": deal_breakers if deal_breakers is not None else [], "deal_makers": deal_makers if deal_makers is not None else []}
 
-async def ask_next_question(user_id: int, latest_answer: str = ""):
+async def ask_next_question(_user_id: int, latest_answer: str = ""):
     global travelers, chats, users_to_ask, start_trip_message
 
-    if user_id not in chats:
-        print(f"Error: Chat session not found for user {travelers[user_id].username}")
+    if _user_id not in chats:
+        print(f"Error: Chat session not found for user {travelers[_user_id]._username}")
         return None
 
-    chat_session = chats[user_id]
-    traveler = travelers[user_id]
+    chat_session = chats[_user_id]
+    traveler = travelers[_user_id]
 
     if latest_answer:
         prompt = f"The user answered '{latest_answer}'. Ask a brief follow-up question to understand their preferences better. Respond with 'DONE!' followed by the user's preferences if you have enough information."
-        traveler.conversation_history.append({"role": "user", "content": latest_answer})
+        traveler._conversation_history.append({"role": "user", "content": latest_answer})
     else:
         prompt = "GO!"
         await first_prompt(chat_session, PROMPT_FILENAME)
-        traveler.conversation_history.append({"role": "model", "content": "Instructions sent."})
+        traveler._conversation_history.append({"role": "model", "content": "Instructions sent."})
 
     ai_response = await generate_prompt(chat_session, prompt)
-    traveler.conversation_history.append({"role": "model", "content": ai_response})
+    traveler._conversation_history.append({"role": "model", "content": ai_response})
 
-    user = discord_client.get_user(user_id)
+    user = discord_client.get_user(_user_id)
     if user and "DONE!" not in ai_response:
         await user.send(ai_response)
 
     if "DONE!" in ai_response:
-        traveler.done = True
+        await user.send("Thanks! I've got all I need.")
+        traveler._done = True
         parts = ai_response.split("DONE!", 1)
         preferences_text = parts[1].strip()
         if preferences_text:
-            print(f"Received DONE! for {traveler.username}:\n{preferences_text}")
-            preferences = parse_single_preference(f"{traveler.username}:\n{preferences_text}")
-            traveler.budget = int(preferences['aspects'].get('budget', None)) if preferences['aspects'].get('budget') else None
-            traveler.history = int(preferences['aspects'].get('history', None)) if preferences['aspects'].get('history') else None
-            traveler.environmental_impact = int(preferences['aspects'].get('environmental_impact', None)) if preferences['aspects'].get('environmental_impact') else None
-            traveler.food = int(preferences['aspects'].get('food', None)) if preferences['aspects'].get('food') else None
-            traveler.deal_breakers = preferences['deal_breakers']
-            traveler.deal_makers = preferences['deal_makers']
-            print(f"Saved preferences for {traveler.username}:\n{traveler}")
-            del chats[user_id]
-            if user_id in users_to_ask:
-                users_to_ask.remove(user_id)
+            print(f"Received DONE! for {traveler._username}:\n{preferences_text}")
+            preferences = parse_single_preference(f"{traveler._username}:\n{preferences_text}")
+
+            for attr_name in dir(traveler):
+                if not attr_name.startswith('_'):
+                    if attr_name in preferences['aspects']:
+                        value = preferences['aspects'][attr_name]
+                        # Attempt to convert to int if the attribute is expected to be a number
+                        if isinstance(getattr(traveler, attr_name), int) and value.isdigit():
+                            setattr(traveler, attr_name, int(value))
+                        else:
+                            setattr(traveler, attr_name, value)
+                    elif attr_name in ['deal_breakers', 'deal_makers'] and preferences.get(attr_name):
+                        setattr(traveler, attr_name, preferences[attr_name])
+                        
+            print(f"Saved preferences for {traveler._username}:\n{traveler}")
+            del chats[_user_id]
+            if _user_id in users_to_ask:
+                users_to_ask.remove(_user_id)
                 
             if not users_to_ask and start_trip_message:
                 await start_trip_message.channel.send("All users have finished their preference gathering.")
@@ -163,9 +194,9 @@ async def trigger_dummy_procedure():
     chats = {}
     start_trip_message = None
     
-    for username, traveler in travelers.items():
-        print(f"Traveler ID: {traveler.user_id}, Username: {traveler.username}")
-        print(f"  Budget: {traveler.budget}")
+    for _username, traveler in travelers.items():
+        print(f"Traveler ID: {traveler._user_id}, Username: {traveler._username}")
+        print(f"  Budget: {traveler.cheap}")
         print(f"  History: {traveler.history}")
         print(f"  Environmental Impact: {traveler.environmental_impact}")
         print(f"  Food: {traveler.food}")
@@ -187,16 +218,16 @@ async def on_message(message):
     if message.content.startswith('!add_user'):
         if not trip_started:
             usernames = message.content.split()[1:]
-            for username in usernames:
-                member = discord.utils.get(message.guild.members, name=username)
+            for _username in usernames:
+                member = discord.utils.get(message.guild.members, name=_username)
                 if member and member.id not in users_to_ask:
                     users_to_ask.append(member.id)
                     travelers[member.id] = Traveler(member.id, member.name)
-                    await message.channel.send(f"User '{username}' added to the trip.")
+                    await message.channel.send(f"User '{_username}' added to the trip.")
                 elif not member:
-                    await message.channel.send(f"User '{username}' not found in this server.")
+                    await message.channel.send(f"User '{_username}' not found in this server.")
                 elif member.id in users_to_ask:
-                    await message.channel.send(f"User '{username}' is already added to the trip.")
+                    await message.channel.send(f"User '{_username}' is already added to the trip.")
         else:
             await message.channel.send("Cannot add users after the trip has started. Use '!start_trip' to begin.")
 
@@ -213,13 +244,13 @@ async def on_message(message):
             await message.channel.send("Please add users to the trip using '!add_user' before starting.")
             
     elif message.author.id in travelers and trip_started and message.author.id in chats:
-        user_id = message.author.id
+        _user_id = message.author.id
         answer = message.content
-        next_question = await ask_next_question(user_id, answer)
+        next_question = await ask_next_question(_user_id, answer)
         if next_question is None:
-            if user_id in travelers: # Add this check
-                print(f"Conversation finished for {travelers[user_id].username}")
+            if _user_id in travelers: # Add this check
+                print(f"Conversation finished for {travelers[_user_id]._username}")
             else:
-                print(f"Conversation finished for user ID {user_id}, but not in travelers anymore.") # For debugging
+                print(f"Conversation finished for user ID {_user_id}, but not in travelers anymore.") # For debugging
 
 discord_client.run(DISCORD_BOT_TOKEN)
