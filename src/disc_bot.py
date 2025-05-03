@@ -45,6 +45,12 @@ class Traveler:
             output += f" environmental_impact, {self.environmental_impact}\n"
         if self.food is not None:
             output += f" food, {self.food}\n"
+        if self.art is not None:
+            output += f" art, {self.art}\n"
+        if self.adventure is not None:
+            output += f" adventure, {self.adventure}\n"
+        if self.temperature is not None:
+            output += f" temperature, {self.temperature}\n"
         if self.deal_breakers:
             output += f" DEAL_BREAKERS: {', '.join(self.deal_breakers)}.\n"
         if self.deal_makers:
