@@ -7,8 +7,8 @@ from typing import Dict, List
 PROMPT_FILENAME = "prompt.txt"
 
 DISCORD_BOT_TOKEN = 'MTM2Nzk5NDA0OTA1OTA5ODcxNw.G-sm5x.bc3Lvyk6Z1gwZD30UwhiMpgBH0erhdF3XM_-7M'
-GEMINI_API_KEY = 'AIzaSyBXKpZrBkFrXZNDoLCIaW-n5mY5AqauXcE'
-SKYSCANNER_API_KEY = 'sh969210162413250384813708759185'
+GEMINI_API_KEY = None #'AIzaSyBXKpZrBkFrXZNDoLCIaW-n5mY5AqauXcE'
+SKYSCANNER_API_KEY = None #'sh969210162413250384813708759185'
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -357,60 +357,61 @@ async def on_ready():
 async def on_message(message):
     global genai_client, users_to_ask, trip_started, travelers, chats, start_trip_message, GEMINI_API_KEY, SKYSCANNER_API_KEY
 
-    if GEMINI_API_KEY == None:
-        message.channel.send("You need to provide a Gemini API key with '!gemini_api KEY'")
-        return
-    
-    if SKYSCANNER_API_KEY == None:
-        message.channel.send("You need to provide a Skyscanner API key with '!skyscanner_api KEY'")
-        return
-
     if message.author == discord_client.user:
         return
     
     if message.content.startswith('!gemini_api'):
         GEMINI_API_KEY = message.content.split()[1:]
         genai_client = genai.Client(api_key=GEMINI_API_KEY)
-        
-    if message.content.startswith('!skyscanner_api'):
-        SKYSCANNER_API_KEY = message.content.split()[1:]
-
-    if message.content.startswith('!add_user'):
-        if not trip_started:
-            usernames = message.content.split()[1:]
-            for _username in usernames:
-                member = discord.utils.get(message.guild.members, name=_username)
-                if member and member.id not in users_to_ask:
-                    users_to_ask.append(member.id)
-                    travelers[member.id] = Traveler(member.id, member.name)
-                    await message.channel.send(f"User '{_username}' added to the trip.")
-                elif not member:
-                    await message.channel.send(f"User '{_username}' not found in this server.")
-                elif member.id in users_to_ask:
-                    await message.channel.send(f"User '{_username}' is already added to the trip.")
-        else:
-            await message.channel.send("Cannot add users after the trip has started. Use '!start_trip' to begin.")
-
-    elif message.content.startswith('!start_trip'):
-        if users_to_ask:
-            trip_started = True
-            start_trip_message = message
-            await message.channel.send(f"Starting preference gathering from users.")
-            if users_to_ask:
-                first_user_id = users_to_ask[0]
-                chats[first_user_id] = genai_client.chats.create(model="gemini-2.0-flash")
-                await ask_next_question(first_user_id)
-        else:
-            await message.channel.send("Please add users to the trip using '!add_user' before starting.")
+        await message.channel.send("Google Gemini API key registered as: {GEMINI_API_KEY}")
             
-    elif message.author.id in travelers and trip_started and message.author.id in chats:
-        _user_id = message.author.id
-        answer = message.content
-        next_question = await ask_next_question(_user_id, answer)
-        if next_question is None:
-            if _user_id in travelers: # Add this check
-                print(f"Conversation finished for {travelers[_user_id]._username}")
+    elif message.content.startswith('!skyscanner_api'):
+        SKYSCANNER_API_KEY = message.content.split()[1:]
+        await message.channel.send("Skyscanner API key registered as: {SKYSCANNER_API_KEY}")
+
+    elif GEMINI_API_KEY == None and message.content.startswith('!'):
+        await message.channel.send("You need to provide a Gemini API key with '!gemini_api KEY'")
+    
+    elif SKYSCANNER_API_KEY == None and message.content.startswith('!'):
+        await message.channel.send("You need to provide a Skyscanner API key with '!skyscanner_api KEY'")
+    
+    else:
+        if message.content.startswith('!add_user'):
+            if not trip_started:
+                usernames = message.content.split()[1:]
+                for _username in usernames:
+                    member = discord.utils.get(message.guild.members, name=_username)
+                    if member and member.id not in users_to_ask:
+                        users_to_ask.append(member.id)
+                        travelers[member.id] = Traveler(member.id, member.name)
+                        await message.channel.send(f"User '{_username}' added to the trip.")
+                    elif not member:
+                        await message.channel.send(f"User '{_username}' not found in this server.")
+                    elif member.id in users_to_ask:
+                        await message.channel.send(f"User '{_username}' is already added to the trip.")
             else:
-                print(f"Conversation finished for user ID {_user_id}, but not in travelers anymore.") # For debugging
+                await message.channel.send("Cannot add users after the trip has started. Use '!start_trip' to begin.")
+
+        elif message.content.startswith('!start_trip'):
+            if users_to_ask:
+                trip_started = True
+                start_trip_message = message
+                await message.channel.send(f"Starting preference gathering from users.")
+                if users_to_ask:
+                    first_user_id = users_to_ask[0]
+                    chats[first_user_id] = genai_client.chats.create(model="gemini-2.0-flash")
+                    await ask_next_question(first_user_id)
+            else:
+                await message.channel.send("Please add users to the trip using '!add_user' before starting.")
+                
+        elif message.author.id in travelers and trip_started and message.author.id in chats:
+            _user_id = message.author.id
+            answer = message.content
+            next_question = await ask_next_question(_user_id, answer)
+            if next_question is None:
+                if _user_id in travelers: # Add this check
+                    print(f"Conversation finished for {travelers[_user_id]._username}")
+                else:
+                    print(f"Conversation finished for user ID {_user_id}, but not in travelers anymore.") # For debugging
 
 discord_client.run(DISCORD_BOT_TOKEN)
