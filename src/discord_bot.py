@@ -1,5 +1,7 @@
 import discord
 from google import genai
+import csv
+import re
 
 PROMPT_FILENAME = "prompt.txt"
 
@@ -11,9 +13,11 @@ chat = client.chats.create(model="gemini-2.0-flash")
 
 intents = discord.Intents.default()
 intents.message_content = True
+intents.members = True
 client = discord.Client(intents=intents)
 
 user_question_history = {} # To store questions and answers for each user
+user_preference_data = {} # To store the final preference data for each user
 
 async def generate_prompt(prompt):
     try:
@@ -38,8 +42,53 @@ async def first_prompt(file_path):
     for sentence in sentences:
         await generate_prompt(sentence)
 
-    #await channel.send("GO!")
+def parse_preferences(ai_output):
+    data = {}
+    parts = ai_output.split("DONE!", 1)[1].strip()
+    user_blocks = parts.strip().split("\n\n")
+    for user_block in user_blocks:
+        if not user_block.strip():
+            continue
+        lines = user_block.strip().split("\n")
+        username = lines[0].strip().rstrip(":")
+        user_data = {}
+        deal_breakers = []
+        deal_makers = []
+        current_section = None
+        for line in lines[1:]:
+            line = line.strip()
+            if line.startswith("DEAL_BREAKERS:"):
+                current_section = "DEAL_BREAKERS"
+            elif line.startswith("DEAL_MAKERS:"):
+                current_section = "DEAL_MAKERS"
+            elif ":" not in line and current_section == "DEAL_BREAKERS":
+                deal_breakers.append(line.strip())
+            elif ":" not in line and current_section == "DEAL_MAKERS":
+                deal_makers.append(line.strip())
+            elif "," in line and current_section is None:
+                aspect, value = map(str.strip, line.split(','))
+                user_data[aspect] = value
+        data[username] = {"aspects": user_data, "deal_breakers": deal_breakers, "deal_makers": deal_makers}
+    return data
 
+def save_preferences_to_csv(username, preferences):
+    filename = f"{username}_preferences.csv"
+    with open(filename, 'w', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(['Aspect', 'Value'])
+        for aspect, value in preferences['aspects'].items():
+            writer.writerow([aspect, value])
+        if preferences['deal_breakers']:
+            writer.writerow(['DEAL_BREAKERS'])
+            for item in preferences['deal_breakers']:
+                writer.writerow([item])
+        if preferences['deal_makers']:
+            writer.writerow(['DEAL_MAKERS'])
+            for item in preferences['deal_makers']:
+                writer.writerow([item])
+    print(f"Preferences for {username} saved to {filename}")
+
+"""
 async def get_preference_summary(history):
     try:
         response = chat.send_message(
@@ -49,7 +98,7 @@ async def get_preference_summary(history):
     except Exception as e:
         print(f"Error generating preference summary: {e}")
         return "Sorry, I couldn't determine your preferences right now."
-
+"""
 @client.event
 async def on_ready():
     print(f'Logged in as {client.user}')
@@ -72,21 +121,13 @@ async def on_message(message):
         user_id = message.author.id
         user_question_history[user_id][-1]["answer"] = user_answer
 
-        #if len(user_question_history[user_id]) < 3: # Example: Ask 3 questions
         previous_question = user_question_history[user_id][-1]["question"]
-        next_prompt = f"The user answered '{user_answer}' to the question '{previous_question}'. Ask a brief follow-up question to understand their preferences better."
+        next_prompt = f"The user {message.author.name} answered '{user_answer}' to the question '{previous_question}'. Ask a brief follow-up question to understand their preferences better."
         next_question = await generate_prompt(next_prompt)
         user_question_history[user_id].append({"question": next_question, "answer": None})
-        await message.channel.send(next_question)
-        """
-        else:
-            history_text = ""
-            for item in user_question_history[user_id]:
-                history_text += f"Q: {item['question']}, A: {item['answer']}\n"
-            preferences = await get_preference_summary(history_text)
-            await message.channel.send(f"Based on our conversation, your preferences seem to be: {preferences}")
-            del user_question_history[user_id] # Reset for the next interaction
-        """
+        
+    elif "DONE!" in message.content:
+        data = parse_preferences(message.content)
+        #save_preferences_to_csv(data)
 
-# Replace 'YOUR_DISCORD_BOT_TOKEN' with your actual Discord bot token
 client.run(DISCORD_BOT_TOKEN)
