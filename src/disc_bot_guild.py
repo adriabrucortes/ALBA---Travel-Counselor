@@ -2,11 +2,11 @@ import discord
 from google import genai
 import asyncio
 import re
-from typing import Dict, List
+from typing import Dict, List, Set, Optional
 
 PROMPT_FILENAME = "prompt.txt"
 
-DISCORD_BOT_TOKEN = 'MTM2Nzk5NDA0OTA1OTA5ODcxNw.G-sm5x.bc3Lvyk6Z1gwZD30UwhiMpgBH0erhdF3XM_-7M' # Keep this as an environment variable in a real deployment
+DISCORD_BOT_TOKEN = 'MTM2Nzk5NDA0OTA1OTA5ODcxNw.G-sm5x.bc3Lvyk6Z1gwZD30UwhiMpgBH0erhdF3XM_-7M'  # Keep this as an environment variable
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -14,6 +14,16 @@ intents.members = True
 discord_client = discord.Client(intents=intents)
 genai_clients: Dict[int, genai.Client] = {}  # Store genai clients per guild
 guild_api_keys: Dict[int, Dict[str, str]] = {}  # Store API keys per guild
+
+# Per-guild state management
+guild_travelers: Dict[int, Dict[int, "Traveler"]] = {}  # guild_id -> {user_id -> Traveler}
+guild_users_to_ask: Dict[int, List[int]] = {}  # guild_id -> [user_id]
+guild_chats: Dict[int, Dict[int, genai.chats.Chat]] = {}  # guild_id -> {user_id -> Chat}
+guild_city_suggestions: Dict[int, List[str]] = {}  # guild_id -> [city]
+guild_trip_started: Dict[int, bool] = {}  # guild_id -> True/False
+guild_start_trip_message: Dict[int, Optional[discord.Message]] = {}  # guild_id -> Message
+guild_poll_message: Dict[int, Optional[discord.Message]] = {}  # guild_id -> Message
+guild_voted_users: Dict[int, Set[int]] = {}  # guild_id -> {user_id}
 
 class Traveler:
     def __init__(self, _user_id: int, _username: str):
@@ -59,20 +69,8 @@ class Traveler:
             output += f" Vote: {self._vote}\n"
         return output.strip()
 
-travelers: Dict[int, Traveler] = {}
-users_to_ask: List[int] = []
-chats: Dict[int, genai.chats.Chat] = {}
-city_suggestions = []
-trip_started: bool = False
-start_trip_message: discord.Message = None
-poll_message: discord.Message = None
-voted_users: set[int] = set()
-
 def get_traveler_preference_attributes(traveler_class):
-    """
-    Returns a list of preference attribute names from the Traveler class,
-    excluding those that start with an underscore.
-    """
+    """Returns a list of preference attribute names from the Traveler class."""
     preference_attributes = []
     temp_traveler = traveler_class(_user_id=0, _username="")
     excluded_attributes = ['deal_breakers', 'deal_makers']
@@ -81,7 +79,7 @@ def get_traveler_preference_attributes(traveler_class):
             preference_attributes.append(attr_name)
     return preference_attributes
 
-async def get_gemini_client(guild: discord.Guild) -> genai.Client | None:
+async def get_gemini_client(guild: discord.Guild) -> Optional[genai.Client]:
     """Retrieves or creates a Gemini client for the given guild."""
     guild_id = guild.id
     gemini_api_key = guild_api_keys.get(guild_id, {}).get('gemini_api_key')
@@ -162,15 +160,17 @@ def parse_single_preference(ai_output: str) -> Dict[str, any]:
         "deal_makers": deal_makers if deal_makers is not None else []
     }
 
-async def ask_next_question(_user_id: int, guild: discord.Guild, latest_answer: str = ""):
-    global travelers, chats, users_to_ask, start_trip_message
-
-    if _user_id not in chats:
-        print(f"Error: Chat session not found for user {travelers[_user_id]._username} in guild {guild.id}")
+async def ask_next_question(_user_id: int, guild: discord.Guild, latest_answer: str = "") -> Optional[str]:
+    guild_id = guild.id
+    if guild_id not in guild_chats or _user_id not in guild_chats[guild_id]:
+        print(f"Error: Chat session not found for user {_user_id} in guild {guild_id}")
         return None
 
-    chat_session = chats[_user_id]
-    traveler = travelers[_user_id]
+    chat_session = guild_chats[guild_id][_user_id]
+    traveler = guild_travelers[guild_id].get(_user_id)
+    if not traveler:
+        print(f"Error: Traveler not found for user {_user_id} in guild {guild_id}")
+        return None
 
     if latest_answer:
         prompt = f"The user answered '{latest_answer}'. Ask a brief follow-up question to understand their preferences better. Respond with 'DONE!' followed by the user's preferences if you have enough information."
@@ -193,14 +193,13 @@ async def ask_next_question(_user_id: int, guild: discord.Guild, latest_answer: 
         parts = ai_response.split("DONE!", 1)
         preferences_text = parts[1].strip()
         if preferences_text:
-            print(f"Received DONE! for {traveler._username} in guild {guild.id}:\n{preferences_text}")
+            print(f"Received DONE! for {traveler._username} in guild {guild_id}:\n{preferences_text}")
             preferences = parse_single_preference(f"{traveler._username}:\n{preferences_text}")
 
             for attr_name in dir(traveler):
                 if not attr_name.startswith('_'):
                     if attr_name in preferences['aspects']:
                         value = preferences['aspects'][attr_name]
-                        # Attempt to convert to int if the attribute is expected to be a number
                         if isinstance(getattr(traveler, attr_name), int) and value.isdigit():
                             setattr(traveler, attr_name, int(value))
                         else:
@@ -208,50 +207,49 @@ async def ask_next_question(_user_id: int, guild: discord.Guild, latest_answer: 
                     elif attr_name in ['origin', 'deal_breakers', 'deal_makers'] and preferences.get(attr_name):
                         setattr(traveler, attr_name, preferences[attr_name])
 
-            print(f"Saved preferences for {traveler._username} in guild {guild.id}:\n{traveler}")
-            del chats[_user_id]
-            if _user_id in users_to_ask:
-                users_to_ask.remove(_user_id)
+            print(f"Saved preferences for {traveler._username} in guild {guild_id}:\n{traveler}")
+            if guild_id in guild_chats and _user_id in guild_chats[guild_id]:
+                del guild_chats[guild_id][_user_id]
+            if guild_id in guild_users_to_ask and _user_id in guild_users_to_ask[guild_id]:
+                guild_users_to_ask[guild_id].remove(_user_id)
 
-            if not users_to_ask and start_trip_message and start_trip_message.guild.id == guild.id:
-                await start_trip_message.channel.send("All users have finished their preference gathering.")
-                await asyncio.sleep(60) # Wait so to not saturate the API
-                await trigger_city_suggestion(start_trip_message.channel)
+            if guild_id in guild_users_to_ask and not guild_users_to_ask[guild_id] and guild_id in guild_start_trip_message and guild_start_trip_message[guild_id]:
+                await guild_start_trip_message[guild_id].channel.send("All users have finished their preference gathering.")
+                await asyncio.sleep(60)
+                await trigger_city_suggestion(guild_start_trip_message[guild_id].channel)
 
-            elif users_to_ask and users_to_ask[0] in travelers and travelers[users_to_ask[0]]._user_id in guild.members: # Start next user in sequential mode
-                genai_client = await get_gemini_client(guild)
-                if genai_client:
-                    await asyncio.sleep(60) # Introduce 1 minute delay
-                    if users_to_ask:
-                        next_user_id = users_to_ask[0]
-                        chats[next_user_id] = genai_client.chats.create(model="gemini-2.0-flash")
-                        await ask_next_question(next_user_id, guild)
-                else:
-                    await guild.owner.send(f"Gemini API key not set for server: {guild.name}. Please use '!gemini_api <KEY>' in a channel.")
+            elif guild_id in guild_users_to_ask and guild_users_to_ask[guild_id]:
+                next_user_id = guild_users_to_ask[guild_id][0]
+                if guild_id in guild_travelers and next_user_id in guild_travelers[guild_id] and discord_client.get_user(next_user_id) in guild.members:
+                    genai_client = await get_gemini_client(guild)
+                    if genai_client:
+                        await asyncio.sleep(60)
+                        if guild_id in guild_users_to_ask and guild_users_to_ask[guild_id]:
+                            next_user_id = guild_users_to_ask[guild_id][0]
+                            if guild_id not in guild_chats:
+                                guild_chats[guild_id] = {}
+                            guild_chats[guild_id][next_user_id] = genai_client.chats.create(model="gemini-2.0-flash")
+                            await ask_next_question(next_user_id, guild)
+                    else:
+                        owner = guild.owner
+                        if owner:
+                            await owner.send(f"Gemini API key not set for server: {guild.name}. Please use '!gemini_api <KEY>' in a channel.")
         return None
     else:
         return ai_response
 
-async def ask_cities(traveler_data: Dict[int, Traveler], guild: discord.Guild):
-    global trip_started
-    """
-    Asks the Gemini instance to suggest 5 possible cities based on traveler data.
-
-    Args:
-        traveler_data (Dict[int, Traveler]): A dictionary where keys are user IDs
-                                            and values are Traveler objects.
-        guild (discord.Guild): The Discord guild the command originated from.
-    """
+async def ask_cities(traveler_data: Dict[int, Traveler], guild: discord.Guild) -> Optional[List[str]]:
+    guild_id = guild.id
     if not traveler_data:
-        print(f"No traveler data available to suggest cities in guild {guild.id}.")
+        print(f"No traveler data available to suggest cities in guild {guild_id}.")
         return None
 
-    trip_started = False
+    if guild_id in guild_trip_started:
+        guild_trip_started[guild_id] = False
     prompt_parts = []
     average_preferences = {}
     preference_attributes = get_traveler_preference_attributes(Traveler)
 
-    # Calculate average preferences
     for attr in preference_attributes:
         total = 0
         count = 0
@@ -285,28 +283,28 @@ async def ask_cities(traveler_data: Dict[int, Traveler], guild: discord.Guild):
         return None
 
     try:
-        response = await genai_client.chats.create(model="gemini-2.0-flash").send_message(full_prompt)
+        response = genai_client.chats.create(model="gemini-2.0-flash").send_message(full_prompt)
         cities = [city.strip() for city in response.text.split("\n") if city.strip()]
-        return cities[:5] # Return only the first 5 suggestions
+        if guild_id not in guild_city_suggestions:
+            guild_city_suggestions[guild_id] = []
+        guild_city_suggestions[guild_id] = cities[:5]
+        return guild_city_suggestions[guild_id]
     except Exception as e:
-        print(f"Error generating city suggestions for guild {guild.id}: {e}")
+        print(f"Error generating city suggestions for guild {guild_id}: {e}")
         return None
 
 async def create_city_poll(channel: discord.TextChannel, suggestions: List[str], traveler_ids: List[int]):
-    """
-    Creates a poll on the Discord server with the suggested cities.
-
-    Args:
-        channel (discord.TextChannel): The channel to send the poll to.
-        suggestions (List[str]): A list of city suggestions.
-        traveler_ids (List[int]): A list of Discord user IDs of the travelers.
-    """
+    guild_id = channel.guild.id
     if not suggestions:
         await channel.send("No city suggestions available to create a poll.")
         return
 
-    global poll_message, voted_users
-    voted_users = set()
+    global guild_poll_message, guild_voted_users
+    if guild_id not in guild_voted_users:
+        guild_voted_users[guild_id] = set()
+    else:
+        guild_voted_users[guild_id].clear()  # Reset votes for a new poll
+
     poll_message_content = "Please vote for your preferred city:\n"
     reactions = ["🇦", "🇧", "🇨", "🇩", "🇪"] # Up to 5 suggestions
     suggestion_emojis = dict(zip(suggestions, reactions))
@@ -315,48 +313,75 @@ async def create_city_poll(channel: discord.TextChannel, suggestions: List[str],
     for i, city in enumerate(suggestions):
         poll_message_content += f"{reactions[i]} {city}\n"
 
-    poll_message = await channel.send(poll_message_content)
+    poll_msg = await channel.send(poll_message_content)
+    guild_poll_message[guild_id] = poll_msg
 
     for reaction in reactions[:len(suggestions)]:
-        await poll_message.add_reaction(reaction)
+        await poll_msg.add_reaction(reaction)
 
     await channel.send(f"Travelers, please react to this message to cast your vote! Only {' '.join(f'<@{tid}>' for tid in traveler_ids)} can have their votes counted.")
 
 async def trigger_city_suggestion(channel: discord.TextChannel):
-    global travelers, users_to_ask, city_suggestions
-    city_suggestions = await ask_cities(travelers, channel.guild)
+    guild_id = channel.guild.id
+    if guild_id not in guild_travelers:
+        await channel.send("No travelers added for this trip.")
+        return
+
+    traveler_data = guild_travelers[guild_id]
+    city_suggestions = await ask_cities(traveler_data, channel.guild)
     if city_suggestions:
-        print(f"\n--- Suggested Cities for guild {channel.guild.id}: ---")
+        print(f"\n--- Suggested Cities for guild {guild_id}: ---")
         for i, city in enumerate(city_suggestions):
             print(f"{i+1}. {city}")
         print("------------------------")
-        await create_city_poll(channel, city_suggestions, list(travelers.keys()))
+        await create_city_poll(channel, city_suggestions, list(traveler_data.keys()))
     else:
         await channel.send("Could not generate city suggestions.")
 
 async def process_votes(message: discord.RawReactionActionEvent):
-    global poll_message, travelers, voted_users, city_suggestions
-    if poll_message and message.message_id == poll_message.id and message.user_id in travelers and message.user_id not in voted_users and message.emoji.name in ["🇦", "🇧", "🇨", "🇩", "🇪"]:
-        emoji_suggestion = dict(zip(["🇦", "🇧", "🇨", "🇩", "🇪"], city_suggestions))
-        voted_city = emoji_suggestion.get(message.emoji.name)
-        if voted_city:
-            travelers[message.user_id]._vote = voted_city
-            voted_users.add(message.user_id)
-            user = discord_client.get_user(message.user_id)
-            if user:
-                await user.send(f"You have voted for '{voted_city}'.")
-            if len(voted_users) == len(travelers):
-                await tally_votes(message.channel_id)
+    guild_id = message.guild_id
+    user_id = message.user_id
 
+    if guild_id not in guild_poll_message or guild_poll_message[guild_id] is None or message.message_id != guild_poll_message[guild_id].id:
+        return
+    if guild_id not in guild_travelers or user_id not in guild_travelers[guild_id]:
+        return
+    if guild_id not in guild_voted_users:
+        guild_voted_users[guild_id] = set()
+    if user_id in guild_voted_users[guild_id]:
+        return
+    if message.emoji.name not in ["🇦", "🇧", "🇨", "🇩", "🇪"]:
+        return
+    if guild_id not in guild_city_suggestions or not guild_city_suggestions[guild_id]:
+        return
+
+    emoji_suggestion = dict(zip(["🇦", "🇧", "🇨", "🇩", "🇪"], guild_city_suggestions[guild_id]))
+    voted_city = emoji_suggestion.get(message.emoji.name)
+    if voted_city:
+        guild_travelers[guild_id][user_id]._vote = voted_city
+        guild_voted_users[guild_id].add(user_id)
+        user = discord_client.get_user(user_id)
+        guild = discord_client.get_guild(guild_id)
+        if user and guild:
+            await user.send(f"You have voted for '{voted_city}' in {guild.name}.")
+        elif user:
+            await user.send(f"You have voted for '{voted_city}' in an unknown server.")
+        if len(guild_voted_users[guild_id]) == len(guild_travelers[guild_id]):
+            await tally_votes(message.channel_id)
+                        
 async def tally_votes(channel_id: int):
-    global travelers
     channel = discord_client.get_channel(channel_id)
     if not channel or not isinstance(channel, discord.TextChannel):
         print(f"Error: Could not find text channel with ID {channel_id} to tally votes.")
         return
 
+    guild_id = channel.guild.id
+    if guild_id not in guild_travelers:
+        await channel.send("No travelers for this server to tally votes.")
+        return
+
     votes = {}
-    for traveler in travelers.values():
+    for traveler in guild_travelers[guild_id].values():
         if traveler._vote:
             votes[traveler._vote] = votes.get(traveler._vote, 0) + 1
 
@@ -370,100 +395,127 @@ async def tally_votes(channel_id: int):
 
 @discord_client.event
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
-    # Ignore reactions from the bot itself
     if payload.user_id == discord_client.user.id:
         return
-    # Fetch the channel to have access to the guild
-    channel = await discord_client.fetch_channel(payload.channel_id)
-    if channel and isinstance(channel, discord.TextChannel):
+    guild = discord_client.get_guild(payload.guild_id)
+    if guild:
         await process_votes(payload)
 
 @discord_client.event
 async def on_ready():
     print(f'Logged in as {discord_client.user}')
     for guild in discord_client.guilds:
-        if guild.id not in guild_api_keys:
-            guild_api_keys[guild.id] = {}
-        print(f"Initialized API key storage for server: {guild.name} (ID: {guild.id})")
+        guild_id = guild.id
+        if guild_id not in guild_api_keys:
+            guild_api_keys[guild_id] = {}
+        if guild_id not in guild_travelers:
+            guild_travelers[guild_id] = {}
+        if guild_id not in guild_users_to_ask:
+            guild_users_to_ask[guild_id] = []
+        if guild_id not in guild_chats:
+            guild_chats[guild_id] = {}
+        if guild_id not in guild_city_suggestions:
+            guild_city_suggestions[guild_id] = []
+        if guild_id not in guild_trip_started:
+            guild_trip_started[guild_id] = False
+        if guild_id not in guild_start_trip_message:
+            guild_start_trip_message[guild_id] = None
+        if guild_id not in guild_poll_message:
+            guild_poll_message[guild_id] = None
+        if guild_id not in guild_voted_users:
+            guild_voted_users[guild_id] = set()
+        print(f"Initialized state for server: {guild.name} (ID: {guild_id})")
 
 @discord_client.event
 async def on_message(message):
-    global users_to_ask, trip_started, travelers, chats, start_trip_message
-
     if message.author == discord_client.user:
         return
 
     guild = message.guild
-    if not guild:  # Ignore direct messages
-        return
+    user = message.author
 
-    if message.content.startswith('!gemini_api'):
-        api_key_parts = message.content.split()[1:]
-        if api_key_parts:
-            api_key = api_key_parts[0]
-            guild_api_keys[guild.id]['gemini_api_key'] = api_key
-            # Optionally re-initialize the client for this guild
-            if guild.id in genai_clients:
-                del genai_clients[guild.id]
-            await message.channel.send(f"Google Gemini API key registered for this server.")
-        else:
-            await message.channel.send("Please provide the Gemini API key after the command.")
+    # Handle commands in server context
+    if guild:
+        guild_id = guild.id
+        if message.content.startswith('!gemini_api'):
+            api_key_parts = message.content.split()[1:]
+            if api_key_parts:
+                api_key = api_key_parts[0]
+                guild_api_keys[guild_id]['gemini_api_key'] = api_key
+                if guild_id in genai_clients:
+                    del genai_clients[guild_id]
+                await message.channel.send(f"Google Gemini API key registered for this server.")
+            else:
+                await message.channel.send("Please provide the Gemini API key after the command.")
 
-    elif message.content.startswith('!skyscanner_api'):
-        api_key_parts = message.content.split()[1:]
-        if api_key_parts:
-            api_key = api_key_parts[0]
-            guild_api_keys[guild.id]['skyscanner_api_key'] = api_key
-            await message.channel.send(f"Skyscanner API key registered for this server.")
-        else:
-            await message.channel.send("Please provide the Skyscanner API key after the command.")
+        elif message.content.startswith('!skyscanner_api'):
+            api_key_parts = message.content.split()[1:]
+            if api_key_parts:
+                api_key = api_key_parts[0]
+                guild_api_keys[guild_id]['skyscanner_api_key'] = api_key
+                await message.channel.send(f"Skyscanner API key registered for this server.")
+            else:
+                await message.channel.send("Please provide the Skyscanner API key after the command.")
 
-    elif guild.id not in guild_api_keys or 'gemini_api_key' not in guild_api_keys[guild.id] and message.content.startswith('!'):
-        await message.channel.send("The Gemini API key has not been set for this server. Please use '!gemini_api <KEY>'.")
-        
-    elif guild.id not in guild_api_keys or 'skyscanner_api_key' not in guild_api_keys[guild.id] and message.content.startswith('!'):
-        await message.channel.send("The Skyscanner API key has not been set for this server. Please use '!skyscanner_api_key <KEY>'.")
+        elif guild_id not in guild_api_keys or 'gemini_api_key' not in guild_api_keys[guild_id] and message.content.startswith('!'):
+            await message.channel.send("The Gemini API key has not been set for this server. Please use '!gemini_api <KEY>'.")
 
-    elif message.content.startswith('!add_user'):
-        if not trip_started:
-            usernames = message.content.split()[1:]
-            for _username in usernames:
-                member = discord.utils.get(guild.members, name=_username)
-                if member and member.id not in users_to_ask:
-                    users_to_ask.append(member.id)
-                    travelers[member.id] = Traveler(member.id, member.name)
-                    await message.channel.send(f"User '{_username}' added to the trip.")
-                elif not member:
-                    await message.channel.send(f"User '{_username}' not found in this server.")
-                elif member.id in users_to_ask:
-                    await message.channel.send(f"User '{_username}' is already added to the trip.")
-        else:
-            await message.channel.send("Cannot add users after the trip has started. Use '!start_trip' to begin.")
+        elif message.content.startswith('!add_user'):
+            if not guild_trip_started.get(guild_id, False):
+                usernames = message.content.split()[1:]
+                if guild_id not in guild_users_to_ask:
+                    guild_users_to_ask[guild_id] = []
+                if guild_id not in guild_travelers:
+                    guild_travelers[guild_id] = {}
+                for _username in usernames:
+                    member = discord.utils.get(guild.members, name=_username)
+                    if member and member.id not in guild_users_to_ask[guild_id]:
+                        guild_users_to_ask[guild_id].append(member.id)
+                        guild_travelers[guild_id][member.id] = Traveler(member.id, member.name)
+                        await message.channel.send(f"User '{_username}' added to the trip.")
+                    elif not member:
+                        await message.channel.send(f"User '{_username}' not found in this server.")
+                    elif member.id in guild_users_to_ask[guild_id]:
+                        await message.channel.send(f"User '{_username}' is already added to the trip.")
+            else:
+                await message.channel.send("Cannot add users after the trip has started. Use '!start_trip' to begin.")
 
-    elif message.content.startswith('!start_trip'):
-        if users_to_ask:
-            trip_started = True
-            start_trip_message = message
-            await message.channel.send(f"Starting preference gathering from users.")
-            if users_to_ask:
-                first_user_id = users_to_ask[0]
+        elif message.content.startswith('!start_trip'):
+            if guild_id in guild_users_to_ask and guild_users_to_ask[guild_id]:
+                guild_trip_started[guild_id] = True
+                guild_start_trip_message[guild_id] = message
+                await message.channel.send(f"Starting preference gathering from users.")
+                first_user_id = guild_users_to_ask[guild_id][0]
                 genai_client = await get_gemini_client(guild)
                 if genai_client:
-                    chats[first_user_id] = genai_client.chats.create(model="gemini-2.0-flash")
+                    if guild_id not in guild_chats:
+                        guild_chats[guild_id] = {}
+                    guild_chats[guild_id][first_user_id] = genai_client.chats.create(model="gemini-2.0-flash")
                     await ask_next_question(first_user_id, guild)
                 else:
-                    await guild.owner.send(f"Gemini API key not set for server: {guild.name}. Please use '!gemini_api <KEY>' in a channel.")
-        else:
-            await message.channel.send("Please add users to the trip using '!add_user' before starting.")
-
-    elif message.author.id in travelers and trip_started and message.author.id in chats and message.guild.id == guild.id:
-        _user_id = message.author.id
-        answer = message.content
-        next_question = await ask_next_question(_user_id, guild, answer)
-        if next_question is None:
-            if _user_id in travelers:
-                print(f"Conversation finished for {travelers[_user_id]._username} in guild {guild.id}")
+                    owner = guild.owner
+                    if owner:
+                        await owner.send(f"Gemini API key not set for server: {guild.name}. Please use '!gemini_api <KEY>' in a channel.")
             else:
-                print(f"Conversation finished for user ID {_user_id}, but not in travelers anymore in guild {guild.id}.") # For debugging
+                await message.channel.send("Please add users to the trip using '!add_user' before starting.")
 
+    # Handle direct messages to the bot
+    elif not guild:
+        user_id = user.id
+        for g_id, travelers in guild_travelers.items():
+            if user_id in travelers and guild_trip_started.get(g_id, False) and g_id in guild_chats and user_id in guild_chats[g_id]:
+                answer = message.content
+                found_guild = discord_client.get_guild(g_id)
+                if found_guild:
+                    next_question = await ask_next_question(user_id, found_guild, answer)
+                    if next_question is None:
+                        if user_id in guild_travelers.get(g_id, {}):
+                            print(f"Conversation finished for {guild_travelers[g_id][user_id]._username} in guild {g_id} (via DM)")
+                        else:
+                            print(f"Conversation finished for user ID {user_id} (via DM), but not in travelers anymore in guild {g_id}.")
+                    return  # Important: Exit after processing the DM
+                else:
+                    print(f"Error: Could not find guild with ID {g_id} for user {user_id}'s DM.")
+                    return
+                
 discord_client.run(DISCORD_BOT_TOKEN)
