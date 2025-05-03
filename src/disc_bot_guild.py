@@ -224,7 +224,7 @@ async def ask_next_question(_user_id: int, guild: discord.Guild, latest_answer: 
                     await asyncio.sleep(60) # Introduce 1 minute delay
                     if users_to_ask:
                         next_user_id = users_to_ask[0]
-                        chats[next_user_id] = genai_client.chat(model="gemini-2.0-flash")
+                        chats[next_user_id] = genai_client.chats.create(model="gemini-2.0-flash")
                         await ask_next_question(next_user_id, guild)
                 else:
                     await guild.owner.send(f"Gemini API key not set for server: {guild.name}. Please use '!gemini_api <KEY>' in a channel.")
@@ -285,7 +285,7 @@ async def ask_cities(traveler_data: Dict[int, Traveler], guild: discord.Guild):
         return None
 
     try:
-        response = await genai_client.chat(model="gemini-2.0-flash").send_message(full_prompt)
+        response = await genai_client.chats.create(model="gemini-2.0-flash").send_message(full_prompt)
         cities = [city.strip() for city in response.text.split("\n") if city.strip()]
         return cities[:5] # Return only the first 5 suggestions
     except Exception as e:
@@ -449,7 +449,7 @@ async def on_message(message):
                 first_user_id = users_to_ask[0]
                 genai_client = await get_gemini_client(guild)
                 if genai_client:
-                    chats[first_user_id] = genai_client.chat(model="gemini-2.0-flash")
+                    chats[first_user_id] = genai_client.chats.create(model="gemini-2.0-flash")
                     await ask_next_question(first_user_id, guild)
                 else:
                     await guild.owner.send(f"Gemini API key not set for server: {guild.name}. Please use '!gemini_api <KEY>' in a channel.")
