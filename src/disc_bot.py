@@ -8,13 +8,13 @@ PROMPT_FILENAME = "prompt.txt"
 
 DISCORD_BOT_TOKEN = 'MTM2Nzk5NDA0OTA1OTA5ODcxNw.G-sm5x.bc3Lvyk6Z1gwZD30UwhiMpgBH0erhdF3XM_-7M'
 GEMINI_API_KEY = 'AIzaSyBXKpZrBkFrXZNDoLCIaW-n5mY5AqauXcE'
-
-genai_client = genai.Client(api_key=GEMINI_API_KEY)
+SKYSCANNER_API_KEY = 'sh969210162413250384813708759185'
 
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 discord_client = discord.Client(intents=intents)
+genai_client = None
 class Traveler:
     def __init__(self, _user_id: int, _username: str):
         self._user_id = _user_id
@@ -355,10 +355,25 @@ async def on_ready():
 
 @discord_client.event
 async def on_message(message):
-    global users_to_ask, trip_started, travelers, chats, start_trip_message
+    global genai_client, users_to_ask, trip_started, travelers, chats, start_trip_message, GEMINI_API_KEY, SKYSCANNER_API_KEY
+
+    if GEMINI_API_KEY == None:
+        message.channel.send("You need to provide a Gemini API key with '!gemini_api KEY'")
+        return
+    
+    if SKYSCANNER_API_KEY == None:
+        message.channel.send("You need to provide a Skyscanner API key with '!skyscanner_api KEY'")
+        return
 
     if message.author == discord_client.user:
         return
+    
+    if message.content.startswith('!gemini_api'):
+        GEMINI_API_KEY = message.content.split()[1:]
+        genai_client = genai.Client(api_key=GEMINI_API_KEY)
+        
+    if message.content.startswith('!skyscanner_api'):
+        SKYSCANNER_API_KEY = message.content.split()[1:]
 
     if message.content.startswith('!add_user'):
         if not trip_started:
