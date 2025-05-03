@@ -15,25 +15,28 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 discord_client = discord.Client(intents=intents)
-
 class Traveler:
     def __init__(self, _user_id: int, _username: str):
         self._user_id = _user_id
         self._username = _username
-        self.origin: {str, str} = {"Country" : None, "City" : None}
+        self.origin: Dict[str, str] = {"Country": None, "City": None}
         self.cheap: int = None
         self.history: int = None
         self.environmental_impact: int = None
         self.food: int = None
+        self.art: int = None
+        self.adventure: int = None
+        self.temperature: int = None
         self.deal_breakers: List[str] = []
         self.deal_makers: List[str] = []
         self._conversation_history: List[Dict[str, str]] = []
         self._done: bool = False
+        self._vote: str = None # To store the user's _vote
 
     def __str__(self):
         output = f"{self._username}:\n"
-        if self.origin is not None:
-            output += f" origin, {self.origin}\n"
+        if self.origin["City"] and self.origin["Country"]:
+            output += f" origin, {self.origin['City']} {self.origin['Country']}\n"
         if self.cheap is not None:
             output += f" cheap, {self.cheap}\n"
         if self.history is not None:
@@ -46,11 +49,14 @@ class Traveler:
             output += f" DEAL_BREAKERS: {', '.join(self.deal_breakers)}.\n"
         if self.deal_makers:
             output += f" DEAL_MAKERS: {', '.join(self.deal_makers)}.\n"
+        if self._vote:
+            output += f" Vote: {self._vote}\n"
         return output.strip()
 
 travelers: Dict[int, Traveler] = {}
 users_to_ask: List[int] = []
 chats: Dict[int, genai.chats.Chat] = {}
+city_suggestions = []
 trip_started: bool = False
 start_trip_message: discord.Message = None
 
@@ -191,7 +197,7 @@ async def ask_next_question(_user_id: int, latest_answer: str = ""):
             if not users_to_ask and start_trip_message:
                 await start_trip_message.channel.send("All users have finished their preference gathering.")
                 await asyncio.sleep(60) # Wait so to not saturate the API
-                await ask_cities(travelers)
+                await trigger_city_suggestion(start_trip_message.channel)
                 
             elif users_to_ask: # Start next user in sequential mode
                 genai_client = genai.Client(api_key=GEMINI_API_KEY) # Restart chat
@@ -205,6 +211,7 @@ async def ask_next_question(_user_id: int, latest_answer: str = ""):
         return ai_response
         
 async def ask_cities(traveler_data: Dict[int, Traveler]):
+    global trip_started
     """
     Asks the Gemini instance to suggest 5 possible cities based on traveler data.
 
@@ -216,6 +223,7 @@ async def ask_cities(traveler_data: Dict[int, Traveler]):
         print("No traveler data available to suggest cities.")
         return None
 
+    trip_started = False
     prompt_parts = []
     average_preferences = {}
     preference_attributes = get_traveler_preference_attributes(Traveler)
@@ -245,32 +253,97 @@ async def ask_cities(traveler_data: Dict[int, Traveler]):
     for aspect, avg_value in average_preferences.items():
         prompt_parts.append(f"- Average {aspect}: {avg_value}")
 
-    prompt_parts.append("\nBased on this information, suggest 5 possible cities that would be suitable for this group of travelers. Provide only the names of the cities.")
+    prompt_parts.append("\nBased on this information, suggest 5 possible cities that would be suitable for this group of travelers. Provide only the names of the cities. Don't output anything else, just the names separated by \n without any additional formatting")
 
     full_prompt = "\n".join(prompt_parts)
 
-    chat_session = genai_client.chats.create(model="gemini-2.0-flash") # Using a more capable model for suggestions
+    chat_session = genai_client.chats.create(model="gemini-2.0-flash")
     try:
         response = chat_session.send_message(full_prompt)
         cities = [city.strip() for city in response.text.split("\n") if city.strip()]
-        print(cities[:5])
         return cities[:5] # Return only the first 5 suggestions
     except Exception as e:
         print(f"Error generating city suggestions: {e}")
-        return None
+        return None    
 
-# Example of how you might call this function after collecting traveler data:
-async def trigger_city_suggestion():
-    global travelers
-    suggested_cities = await ask_cities(travelers)
-    if suggested_cities:
+
+async def create_city_poll(channel: discord.TextChannel, suggestions: List[str], traveler_ids: List[int]):
+    """
+    Creates a poll on the Discord server with the suggested cities.
+
+    Args:
+        channel (discord.TextChannel): The channel to send the poll to.
+        suggestions (List[str]): A list of city suggestions.
+        traveler_ids (List[int]): A list of Discord user IDs of the travelers.
+    """
+    if not suggestions:
+        await channel.send("No city suggestions available to create a poll.")
+        return
+
+    global poll_message, voted_users
+    voted_users = set()
+    poll_message_content = "Please _vote for your preferred city:\n"
+    reactions = ["🇦", "🇧", "🇨", "🇩", "🇪"] # Up to 5 suggestions
+    suggestion_emojis = dict(zip(suggestions, reactions))
+    emoji_suggestion = dict(zip(reactions, suggestions))
+
+    for i, city in enumerate(suggestions):
+        poll_message_content += f"{reactions[i]} {city}\n"
+
+    poll_message = await channel.send(poll_message_content)
+
+    for reaction in reactions[:len(suggestions)]:
+        await poll_message.add_reaction(reaction)
+
+    await channel.send(f"Travelers, please react to this message to cast your _vote! Only {' '.join(f'<@{tid}>' for tid in traveler_ids)} can have their votes counted.")
+
+async def trigger_city_suggestion(channel: discord.TextChannel):
+    global travelers, users_to_ask, city_suggestions
+    city_suggestions = await ask_cities(travelers)
+    if city_suggestions:
         print("\n--- Suggested Cities ---")
-        for i, city in enumerate(suggested_cities):
+        for i, city in enumerate(city_suggestions):
             print(f"{i+1}. {city}")
         print("------------------------")
+        await create_city_poll(channel, city_suggestions, list(travelers.keys()))
     else:
-        print("Could not generate city suggestions.")
-    
+        await channel.send("Could not generate city suggestions.")
+
+async def process_votes(message: discord.RawReactionActionEvent):
+    global poll_message, travelers, voted_users, city_suggestions
+    if message.message_id == poll_message.id and message.user_id in travelers and message.user_id not in voted_users and message.emoji.name in ["🇦", "🇧", "🇨", "🇩", "🇪"]:
+        emoji_suggestion = dict(zip(["🇦", "🇧", "🇨", "🇩", "🇪"], city_suggestions))
+        voted_city = emoji_suggestion.get(message.emoji.name)
+        if voted_city:
+            travelers[message.user_id]._vote = voted_city
+            voted_users.add(message.user_id)
+            user = discord_client.get_user(message.user_id)
+            if user:
+                await user.send(f"You have voted for '{voted_city}'.")
+            if len(voted_users) == len(travelers):
+                await tally_votes(poll_message.channel)
+
+async def tally_votes(channel: discord.TextChannel):
+    global travelers
+    votes = {}
+    for traveler in travelers.values():
+        if traveler._vote:
+            votes[traveler._vote] = votes.get(traveler._vote, 0) + 1
+
+    if votes:
+        results = "--- Poll Results ---\n"
+        for city, count in sorted(votes.items(), key=lambda item: item[1], reverse=True):
+            results += f"{city}: {count} votes\n"
+        await channel.send(results)
+    else:
+        await channel.send("No votes were cast.")
+
+@discord_client.event
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    # Ignore reactions from the bot itself
+    if payload.user_id == discord_client.user.id:
+        return
+    await process_votes(payload)
 
 @discord_client.event
 async def on_ready():
