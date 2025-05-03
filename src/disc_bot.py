@@ -20,6 +20,7 @@ class Traveler:
     def __init__(self, _user_id: int, _username: str):
         self._user_id = _user_id
         self._username = _username
+        self.origin: {str, str} = {"Country" : None, "City" : None}
         self.cheap: int = None
         self.history: int = None
         self.environmental_impact: int = None
@@ -31,6 +32,8 @@ class Traveler:
 
     def __str__(self):
         output = f"{self._username}:\n"
+        if self.origin is not None:
+            output += f" origin, {self.origin}\n"
         if self.cheap is not None:
             output += f" cheap, {self.cheap}\n"
         if self.history is not None:
@@ -99,25 +102,41 @@ async def first_prompt(chat_session: genai.chats.Chat, file_path: str):
 
 
 def parse_single_preference(ai_output: str) -> Dict[str, any]:
-    #data = {}
     lines = ai_output.strip().split("\n")
-    #username_line = lines[0].strip().rstrip(":")
     user_data = {}
     deal_breakers = None
     deal_makers = None
+    origin_text = None
+
     for line in lines[1:]:
         line = line.strip()
-        if line.startswith("DEAL_BREAKERS:"):
+        if line.startswith("origin,"):
+            origin_text = line.split(",", 1)[1].strip()
+        elif line.startswith("DEAL_BREAKERS:"):
             deal_breakers_text = line.split(":", 1)[1].strip()
             deal_breakers = [deal_breakers_text]
         elif line.startswith("DEAL_MAKERS:"):
             deal_makers_text = line.split(":", 1)[1].strip()
             deal_makers = [deal_makers_text]
-        elif "," in line and not line.startswith("DEAL_BREAKERS:") and not line.startswith("DEAL_MAKERS:"):
+        elif "," in line and not line.startswith("DEAL_BREAKERS:") and not line.startswith("DEAL_MAKERS:") and not line.startswith("origin,"):
             aspect, value = map(str.strip, line.split(','))
             user_data[aspect] = value
-    return {"aspects": user_data, "deal_breakers": deal_breakers if deal_breakers is not None else [], "deal_makers": deal_makers if deal_makers is not None else []}
 
+    origin_city = None
+    origin_country = None
+    if origin_text:
+        origin_parts = origin_text.split()
+        if len(origin_parts) >= 2:
+            origin_city = origin_parts[0]
+            origin_country = " ".join(origin_parts[1:])
+
+    return {
+        "origin": {"Country": origin_country, "City": origin_city},
+        "aspects": user_data,
+        "deal_breakers": deal_breakers if deal_breakers is not None else [],
+        "deal_makers": deal_makers if deal_makers is not None else []
+    }
+    
 async def ask_next_question(_user_id: int, latest_answer: str = ""):
     global travelers, chats, users_to_ask, start_trip_message
 
@@ -161,7 +180,7 @@ async def ask_next_question(_user_id: int, latest_answer: str = ""):
                             setattr(traveler, attr_name, int(value))
                         else:
                             setattr(traveler, attr_name, value)
-                    elif attr_name in ['deal_breakers', 'deal_makers'] and preferences.get(attr_name):
+                    elif attr_name in ['origin', 'deal_breakers', 'deal_makers'] and preferences.get(attr_name):
                         setattr(traveler, attr_name, preferences[attr_name])
                         
             print(f"Saved preferences for {traveler._username}:\n{traveler}")
@@ -171,7 +190,8 @@ async def ask_next_question(_user_id: int, latest_answer: str = ""):
                 
             if not users_to_ask and start_trip_message:
                 await start_trip_message.channel.send("All users have finished their preference gathering.")
-                await trigger_dummy_procedure()
+                await asyncio.sleep(60) # Wait so to not saturate the API
+                await ask_cities(travelers)
                 
             elif users_to_ask: # Start next user in sequential mode
                 genai_client = genai.Client(api_key=GEMINI_API_KEY) # Restart chat
@@ -184,25 +204,73 @@ async def ask_next_question(_user_id: int, latest_answer: str = ""):
     else:
         return ai_response
         
-async def trigger_dummy_procedure():
-    print("\n--- Triggering Dummy Procedure with Traveler Data ---")
-    # In a real scenario, you would process the 'travelers' data here
-    global users_to_ask, trip_started, travelers, chats, start_trip_message
-    users_to_ask = []
-    trip_started = False
-    travelers = {}
-    chats = {}
-    start_trip_message = None
+async def ask_cities(traveler_data: Dict[int, Traveler]):
+    """
+    Asks the Gemini instance to suggest 5 possible cities based on traveler data.
+
+    Args:
+        traveler_data (Dict[int, Traveler]): A dictionary where keys are user IDs
+                                            and values are Traveler objects.
+    """
+    if not traveler_data:
+        print("No traveler data available to suggest cities.")
+        return None
+
+    prompt_parts = []
+    average_preferences = {}
+    preference_attributes = get_traveler_preference_attributes(Traveler)
+
+    # Calculate average preferences
+    for attr in preference_attributes:
+        total = 0
+        count = 0
+        for traveler in traveler_data.values():
+            value = getattr(traveler, attr)
+            if isinstance(value, int):
+                total += value
+                count += 1
+        if count > 0:
+            average_preferences[attr] = total / count
+
+    prompt_parts.append("Here is the information for the travelers:")
+    for user_id, traveler in traveler_data.items():
+        origin_str = f"Origin: {traveler.origin['City']} {traveler.origin['Country']}" if traveler.origin['City'] and traveler.origin['Country'] else "Origin not specified"
+        budget_str = f"Budget preference (cheap): {traveler.cheap}" if traveler.cheap is not None else "Budget preference not specified"
+        deal_breakers_str = f"Deal breakers: {', '.join(traveler.deal_breakers)}" if traveler.deal_breakers else "No deal breakers"
+        deal_makers_str = f"Deal makers: {', '.join(traveler.deal_makers)}" if traveler.deal_makers else "No deal makers"
+
+        prompt_parts.append(f"- User {traveler._username} ({origin_str}, {budget_str}, {deal_breakers_str}, {deal_makers_str})")
+
+    prompt_parts.append("\nConsider the following average preferences across all users:")
+    for aspect, avg_value in average_preferences.items():
+        prompt_parts.append(f"- Average {aspect}: {avg_value}")
+
+    prompt_parts.append("\nBased on this information, suggest 5 possible cities that would be suitable for this group of travelers. Provide only the names of the cities.")
+
+    full_prompt = "\n".join(prompt_parts)
+
+    chat_session = genai_client.chats.create(model="gemini-2.0-flash") # Using a more capable model for suggestions
+    try:
+        response = chat_session.send_message(full_prompt)
+        cities = [city.strip() for city in response.text.split("\n") if city.strip()]
+        print(cities[:5])
+        return cities[:5] # Return only the first 5 suggestions
+    except Exception as e:
+        print(f"Error generating city suggestions: {e}")
+        return None
+
+# Example of how you might call this function after collecting traveler data:
+async def trigger_city_suggestion():
+    global travelers
+    suggested_cities = await ask_cities(travelers)
+    if suggested_cities:
+        print("\n--- Suggested Cities ---")
+        for i, city in enumerate(suggested_cities):
+            print(f"{i+1}. {city}")
+        print("------------------------")
+    else:
+        print("Could not generate city suggestions.")
     
-    for _username, traveler in travelers.items():
-        print(f"Traveler ID: {traveler._user_id}, Username: {traveler._username}")
-        print(f"  Budget: {traveler.cheap}")
-        print(f"  History: {traveler.history}")
-        print(f"  Environmental Impact: {traveler.environmental_impact}")
-        print(f"  Food: {traveler.food}")
-        print(f"  Deal Breakers: {traveler.deal_breakers}")
-        print(f"  Deal Makers: {traveler.deal_makers}")
-        print("--------------------------------------------------")
 
 @discord_client.event
 async def on_ready():
