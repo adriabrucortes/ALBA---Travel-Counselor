@@ -363,11 +363,11 @@ async def on_message(message):
     if message.content.startswith('!gemini_api'):
         GEMINI_API_KEY = message.content.split()[1:]
         genai_client = genai.Client(api_key=GEMINI_API_KEY)
-        await message.channel.send("Google Gemini API key registered as: {GEMINI_API_KEY}")
+        await message.channel.send(f"Google Gemini API key registered as: {GEMINI_API_KEY}")
             
     elif message.content.startswith('!skyscanner_api'):
         SKYSCANNER_API_KEY = message.content.split()[1:]
-        await message.channel.send("Skyscanner API key registered as: {SKYSCANNER_API_KEY}")
+        await message.channel.send(f"Skyscanner API key registered as: {SKYSCANNER_API_KEY}")
 
     elif GEMINI_API_KEY == None and message.content.startswith('!'):
         await message.channel.send("You need to provide a Gemini API key with '!gemini_api KEY'")
