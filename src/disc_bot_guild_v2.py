@@ -429,81 +429,90 @@ async def on_message(message):
         return
 
     guild = message.guild
-    if not guild:
-        return
+    user = message.author
 
-    guild_id = guild.id
-
-    if message.content.startswith('!gemini_api'):
-        api_key_parts = message.content.split()[1:]
-        if api_key_parts:
-            api_key = api_key_parts[0]
-            guild_api_keys[guild_id]['gemini_api_key'] = api_key
-            if guild_id in genai_clients:
-                del genai_clients[guild_id]
-            await message.channel.send(f"Google Gemini API key registered for this server.")
-        else:
-            await message.channel.send("Please provide the Gemini API key after the command.")
-
-    elif message.content.startswith('!skyscanner_api'):
-        api_key_parts = message.content.split()[1:]
-        if api_key_parts:
-            api_key = api_key_parts[0]
-            guild_api_keys[guild_id]['skyscanner_api_key'] = api_key
-            await message.channel.send(f"Skyscanner API key registered for this server.")
-        else:
-            await message.channel.send("Please provide the Skyscanner API key after the command.")
-
-    elif guild_id not in guild_api_keys or 'gemini_api_key' not in guild_api_keys[guild_id] and message.content.startswith('!'):
-        await message.channel.send("The Gemini API key has not been set for this server. Please use '!gemini_api <KEY>'.")
-
-    elif message.content.startswith('!add_user'):
-        if not guild_trip_started.get(guild_id, False):
-            usernames = message.content.split()[1:]
-            if guild_id not in guild_users_to_ask:
-                guild_users_to_ask[guild_id] = []
-            if guild_id not in guild_travelers:
-                guild_travelers[guild_id] = {}
-            for _username in usernames:
-                member = discord.utils.get(guild.members, name=_username)
-                if member and member.id not in guild_users_to_ask[guild_id]:
-                    guild_users_to_ask[guild_id].append(member.id)
-                    guild_travelers[guild_id][member.id] = Traveler(member.id, member.name)
-                    await message.channel.send(f"User '{_username}' added to the trip.")
-                elif not member:
-                    await message.channel.send(f"User '{_username}' not found in this server.")
-                elif member.id in guild_users_to_ask[guild_id]:
-                    await message.channel.send(f"User '{_username}' is already added to the trip.")
-        else:
-            await message.channel.send("Cannot add users after the trip has started. Use '!start_trip' to begin.")
-
-    elif message.content.startswith('!start_trip'):
-        if guild_id in guild_users_to_ask and guild_users_to_ask[guild_id]:
-            guild_trip_started[guild_id] = True
-            guild_start_trip_message[guild_id] = message
-            await message.channel.send(f"Starting preference gathering from users.")
-            first_user_id = guild_users_to_ask[guild_id][0]
-            genai_client = await get_gemini_client(guild)
-            if genai_client:
-                if guild_id not in guild_chats:
-                    guild_chats[guild_id] = {}
-                guild_chats[guild_id][first_user_id] = genai_client.chats.create(model="gemini-2.0-flash")
-                await ask_next_question(first_user_id, guild)
+    # Handle commands in server context
+    if guild:
+        guild_id = guild.id
+        if message.content.startswith('!gemini_api'):
+            api_key_parts = message.content.split()[1:]
+            if api_key_parts:
+                api_key = api_key_parts[0]
+                guild_api_keys[guild_id]['gemini_api_key'] = api_key
+                if guild_id in genai_clients:
+                    del genai_clients[guild_id]
+                await message.channel.send(f"Google Gemini API key registered for this server.")
             else:
-                owner = guild.owner
-                if owner:
-                    await owner.send(f"Gemini API key not set for server: {guild.name}. Please use '!gemini_api <KEY>' in a channel.")
-        else:
-            await message.channel.send("Please add users to the trip using '!add_user' before starting.")
+                await message.channel.send("Please provide the Gemini API key after the command.")
 
-    elif message.author.id in guild_travelers.get(guild_id, {}) and guild_trip_started.get(guild_id, False) and message.author.id in guild_chats.get(guild_id, {}):
-        _user_id = message.author.id
-        answer = message.content
-        next_question = await ask_next_question(_user_id, guild, answer)
-        if next_question is None:
-            if _user_id in guild_travelers.get(guild_id, {}):
-                print(f"Conversation finished for {guild_travelers[guild_id][_user_id]._username} in guild {guild_id}")
+        elif message.content.startswith('!skyscanner_api'):
+            api_key_parts = message.content.split()[1:]
+            if api_key_parts:
+                api_key = api_key_parts[0]
+                guild_api_keys[guild_id]['skyscanner_api_key'] = api_key
+                await message.channel.send(f"Skyscanner API key registered for this server.")
             else:
-                print(f"Conversation finished for user ID {_user_id}, but not in travelers anymore in guild {guild_id}.")
+                await message.channel.send("Please provide the Skyscanner API key after the command.")
 
+        elif guild_id not in guild_api_keys or 'gemini_api_key' not in guild_api_keys[guild_id] and message.content.startswith('!'):
+            await message.channel.send("The Gemini API key has not been set for this server. Please use '!gemini_api <KEY>'.")
+
+        elif message.content.startswith('!add_user'):
+            if not guild_trip_started.get(guild_id, False):
+                usernames = message.content.split()[1:]
+                if guild_id not in guild_users_to_ask:
+                    guild_users_to_ask[guild_id] = []
+                if guild_id not in guild_travelers:
+                    guild_travelers[guild_id] = {}
+                for _username in usernames:
+                    member = discord.utils.get(guild.members, name=_username)
+                    if member and member.id not in guild_users_to_ask[guild_id]:
+                        guild_users_to_ask[guild_id].append(member.id)
+                        guild_travelers[guild_id][member.id] = Traveler(member.id, member.name)
+                        await message.channel.send(f"User '{_username}' added to the trip.")
+                    elif not member:
+                        await message.channel.send(f"User '{_username}' not found in this server.")
+                    elif member.id in guild_users_to_ask[guild_id]:
+                        await message.channel.send(f"User '{_username}' is already added to the trip.")
+            else:
+                await message.channel.send("Cannot add users after the trip has started. Use '!start_trip' to begin.")
+
+        elif message.content.startswith('!start_trip'):
+            if guild_id in guild_users_to_ask and guild_users_to_ask[guild_id]:
+                guild_trip_started[guild_id] = True
+                guild_start_trip_message[guild_id] = message
+                await message.channel.send(f"Starting preference gathering from users.")
+                first_user_id = guild_users_to_ask[guild_id][0]
+                genai_client = await get_gemini_client(guild)
+                if genai_client:
+                    if guild_id not in guild_chats:
+                        guild_chats[guild_id] = {}
+                    guild_chats[guild_id][first_user_id] = genai_client.chats.create(model="gemini-2.0-flash")
+                    await ask_next_question(first_user_id, guild)
+                else:
+                    owner = guild.owner
+                    if owner:
+                        await owner.send(f"Gemini API key not set for server: {guild.name}. Please use '!gemini_api <KEY>' in a channel.")
+            else:
+                await message.channel.send("Please add users to the trip using '!add_user' before starting.")
+
+    # Handle direct messages to the bot
+    elif not guild:
+        user_id = user.id
+        for g_id, travelers in guild_travelers.items():
+            if user_id in travelers and guild_trip_started.get(g_id, False) and g_id in guild_chats and user_id in guild_chats[g_id]:
+                answer = message.content
+                found_guild = discord_client.get_guild(g_id)
+                if found_guild:
+                    next_question = await ask_next_question(user_id, found_guild, answer)
+                    if next_question is None:
+                        if user_id in guild_travelers.get(g_id, {}):
+                            print(f"Conversation finished for {guild_travelers[g_id][user_id]._username} in guild {g_id} (via DM)")
+                        else:
+                            print(f"Conversation finished for user ID {user_id} (via DM), but not in travelers anymore in guild {g_id}.")
+                    return  # Important: Exit after processing the DM
+                else:
+                    print(f"Error: Could not find guild with ID {g_id} for user {user_id}'s DM.")
+                    return
+                
 discord_client.run(DISCORD_BOT_TOKEN)
