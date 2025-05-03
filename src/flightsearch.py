@@ -1,8 +1,5 @@
-import json
-
 import requests
 from pydantic import BaseModel, ValidationError
-from static import markets
 
 indicative_flight_endpoint = "https://partners.api.skyscanner.net/apiservices/v3/flights/indicative/search"
 api_key = "sh969210162413250384813708759185"
@@ -112,14 +109,7 @@ def get_lowest_price(raw_response): # returns -1 if no flights
         return min(prices)
 
 
-def get_market_and_currency(country_name: str):
-    for market in markets:
-        if market['name'] == country_name:
-            return market['code'], market['currency']
-    return None
-
-
-# gemini gives us iatas, date range, currency and home country
+# gemini gives us iatas and date range
 def search_cheapest_flights(origin_iata: str, destination_iata: str, date_range: dict):
     resp = send_request(origin_iata, destination_iata, date_range, "EUR", "ES")
     if resp:
