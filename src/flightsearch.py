@@ -120,9 +120,8 @@ def get_market_and_currency(country_name: str):
 
 
 # gemini gives us iatas, date range, currency and home country
-def search_cheapest_flights(origin_country: str, origin_iata: str, destination_iata: str, date_range: dict):
-    market, currency = get_market_and_currency(origin_country)
-    resp = send_request(origin_iata, destination_iata, date_range, currency, market)
+def search_cheapest_flights(origin_iata: str, destination_iata: str, date_range: dict):
+    resp = send_request(origin_iata, destination_iata, date_range, "EUR", "ES")
     if resp:
         return get_lowest_price(resp)
     else:
@@ -130,10 +129,9 @@ def search_cheapest_flights(origin_country: str, origin_iata: str, destination_i
 
 
 if __name__ == "__main__":
-    country = "South Africa"
     origin_iata = "CPT"
     destination_iata = "BCN"
     date_range = {"start_month": 8, "start_year": 2025, "end_month": 9, "end_year": 2025}
-    cheapest = search_cheapest_flights(country, origin_iata, destination_iata, date_range)
+    cheapest = search_cheapest_flights(origin_iata, destination_iata, date_range)
 
     print(cheapest)
