@@ -2,8 +2,6 @@ import requests
 from pydantic import BaseModel, ValidationError
 
 indicative_flight_endpoint = "https://partners.api.skyscanner.net/apiservices/v3/flights/indicative/search"
-api_key = "sh969210162413250384813708759185"
-
 
 class MinPrice(BaseModel):
     amount: str
@@ -69,7 +67,7 @@ def create_payload(origin_iata: str, destination_iata: str, date_range: dict, cu
     }
 
 
-def send_request(origin_iata: str, destination_iata: str, date_range: dict, currency: str, market: str):
+def send_request(origin_iata: str, destination_iata: str, date_range: dict, currency: str, market: str, api_key: str):
     headers = { "x-api-key": api_key }
 
     # Create the request payload
@@ -104,18 +102,18 @@ def get_lowest_price(raw_response): # returns -1 if no flights
             print("Validation Error:", e)
 
     if len(prices) == 0:
-        return -1
+        return 1000000000
     else:
         return min(prices)
 
 
 # gemini gives us iatas and date range
-def search_cheapest_flights(origin_iata: str, destination_iata: str, date_range: dict):
-    resp = send_request(origin_iata, destination_iata, date_range, "EUR", "ES")
+def search_cheapest_flights(origin_iata: str, destination_iata: str, date_range: dict, api_key: str):
+    resp = send_request(origin_iata, destination_iata, date_range, "EUR", "ES", api_key)
     if resp:
         return get_lowest_price(resp)
     else:
-        return -1
+        return 10000000000
 
 
 if __name__ == "__main__":
