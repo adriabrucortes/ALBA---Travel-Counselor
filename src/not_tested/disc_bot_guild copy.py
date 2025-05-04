@@ -1,8 +1,14 @@
+import json
+
 import discord
 from google import genai
 import asyncio
 import re
 from typing import Dict, List, Set, Optional
+from tabulate import tabulate
+from pprint import pprint
+
+from flightsearch import search_cheapest_flights
 
 PROMPT_FILENAME = "prompt.txt"
 
@@ -29,7 +35,7 @@ class Traveler:
     def __init__(self, _user_id: int, _username: str):
         self._user_id = _user_id
         self._username = _username
-        self.origin: Dict[str, str] = {"Country": None, "City": None}
+        self.origin: Dict[str, str] = {"Country": None, "City": None, "iata": None}
         self.cheap: int = None
         self.history: int = None
         self.environmental_impact: int = None
@@ -238,7 +244,26 @@ async def ask_next_question(_user_id: int, guild: discord.Guild, latest_answer: 
     else:
         return ai_response
 
-async def ask_cities(traveler_data: Dict[int, Traveler], guild: discord.Guild) -> Optional[List[str]]:
+
+def update_travelers_with_origin(origins_dict, guild_id):
+    for id, traveler in guild_travelers[guild_id].items():
+        origin = next((t for t in origins_dict if t.get("traveler") == traveler._username), None)
+        if origin:
+            traveler.origin['iata'] = origin['origin_iata']
+
+
+def parse_text_to_dict(input_text):
+    # Remove the triple backticks and optional language tag (e.g., ```json)
+    cleaned = re.sub(r'^```.*?\n|\n```$', '', input_text.strip(), flags=re.DOTALL)
+    # Parse the remaining JSON string
+    try:
+        data = json.loads(cleaned)
+        return data
+    except json.JSONDecodeError as e:
+        raise ValueError("Invalid JSON format") from e
+
+
+async def ask_cities(traveler_data: Dict[int, Traveler], guild: discord.Guild) -> Optional[List[Dict]]:
     guild_id = guild.id
     if not traveler_data:
         print(f"No traveler data available to suggest cities in guild {guild_id}.")
@@ -274,7 +299,35 @@ async def ask_cities(traveler_data: Dict[int, Traveler], guild: discord.Guild) -
     for aspect, avg_value in average_preferences.items():
         prompt_parts.append(f"- Average {aspect}: {avg_value}")
 
-    prompt_parts.append("\nBased on this information, suggest 5 possible cities that would be suitable for this group of travelers. Provide only the names of the cities. Don't output anything else, just the names separated by \n without any additional formatting")
+    # prompt_parts.append("\nBased on this information, suggest 5 possible cities that would be suitable for this group of travelers. Provide only the names of the cities. Don't output anything else, just the names separated by \n without any additional formatting")
+
+    sugg_cities_prompt = """Based on this information, suggest 10 possible cities that would be suitable for this group of travelers.
+            Give the output in the following format with all the data for the travelers and the suggested cities. Bear in mind this
+            should be raw text, not prefixed with json or any other formatting:
+            {
+                "cities": [
+                            {
+                                "city_name": <city_name>,
+                                "longitude": <longitude 5 decimal point float>,
+                                "latitude": <longitude 5 decimal point float>,
+                                "closest_airport": <3 character iata code of the nearest airport to that city>
+                            },
+                            {...},
+                            ...
+                        ],
+                "traveler_origins": [
+                    {
+                        "traveler": <traveler_username>,
+                        "home_country": <traveler_home_country>,
+                        "home_city": <traveler_home_city>,
+                        "origin_iata": <traveler_origin_iata (3 character code of home city airport)> 
+                    },
+                    {...},
+                    ...
+                ]
+            }
+        """
+    prompt_parts.append(sugg_cities_prompt)
 
     full_prompt = "\n".join(prompt_parts)
 
@@ -284,20 +337,67 @@ async def ask_cities(traveler_data: Dict[int, Traveler], guild: discord.Guild) -
 
     try:
         response = genai_client.chats.create(model="gemini-2.0-flash").send_message(full_prompt)
-        cities = [city.strip() for city in response.text.split("\n") if city.strip()]
-        if guild_id not in guild_city_suggestions:
-            guild_city_suggestions[guild_id] = []
-        guild_city_suggestions[guild_id] = cities[:5]
-        return guild_city_suggestions[guild_id]
+        # cities = [city.strip() for city in response.text.split("\n") if city.strip()]
+        # if guild_id not in guild_city_suggestions:
+        #     guild_city_suggestions[guild_id] = []
+        # guild_city_suggestions[guild_id] = cities[:5]
+        # return guild_city_suggestions[guild_id]
+
+        parsed_resp = parse_text_to_dict(response.text)
+        print(parsed_resp)
+        cities = parsed_resp['cities']
+        traveler_origins = parsed_resp['traveler_origins']
+        update_travelers_with_origin(traveler_origins, guild_id)
+
+        # print
+        print('Cities recommended:')
+        pprint(cities)
+        print('Updated travelers')
+        for tid, traveler in guild_travelers[guild_id].items():
+            print(f"{tid}: {traveler.origin['iata']}")
+
+        return cities
+
     except Exception as e:
         print(f"Error generating city suggestions for guild {guild_id}: {e}")
         return None
 
-async def create_city_poll(channel: discord.TextChannel, suggestions: List[str], traveler_ids: List[int]):
+
+def format_prices_by_city(prices):
+    # Extract all cities and users from the data
+    cities = list(prices.keys())
+    users = list(next(iter(prices.values())).keys())  # Get users from the first city's dictionary
+
+    # Prepare the headers for the table
+    headers = ["Traveler"] + cities  # The first column will be "User", followed by cities as columns
+
+    # Prepare the rows for the table
+    table_data = []
+    for user in users:
+        # Create a row starting with the username, followed by their prices for each city
+        row = [user] + [prices[city][user] for city in cities]
+        table_data.append(row)
+
+    # Format the table using tabulate
+    table = tabulate(table_data, headers, tablefmt="pretty")
+    return table
+
+
+async def create_city_poll(channel: discord.TextChannel, descriptions: str, prices_by_city_by_user: Dict, suggestions: List[Dict], traveler_ids: List[int]):
     guild_id = channel.guild.id
     if not suggestions:
         await channel.send("No city suggestions available to create a poll.")
         return
+
+    # send descriptions
+    await channel.send(descriptions)
+
+    # send price breakdown
+    breakdown_message = "Here's a price breakdown by person:\n"
+    breakdown_message += format_prices_by_city(prices_by_city_by_user)
+    await channel.send(breakdown_message)
+
+    city_names = [city['city_name'] for city in suggestions]
 
     global guild_poll_message, guild_voted_users
     if guild_id not in guild_voted_users:
@@ -307,19 +407,78 @@ async def create_city_poll(channel: discord.TextChannel, suggestions: List[str],
 
     poll_message_content = "Please vote for your preferred city:\n"
     reactions = ["🇦", "🇧", "🇨", "🇩", "🇪"] # Up to 5 suggestions
-    suggestion_emojis = dict(zip(suggestions, reactions))
-    emoji_suggestion = dict(zip(reactions, suggestions))
+    suggestion_emojis = dict(zip(city_names, reactions))
+    emoji_suggestion = dict(zip(reactions, city_names))
 
-    for i, city in enumerate(suggestions):
-        poll_message_content += f"{reactions[i]} {city}\n"
+    for i in range(len(city_names)):
+        poll_message_content += f"{reactions[i]} {city_names[i]}\n"
 
     poll_msg = await channel.send(poll_message_content)
     guild_poll_message[guild_id] = poll_msg
 
-    for reaction in reactions[:len(suggestions)]:
+    for reaction in reactions[:len(city_names)]:
         await poll_msg.add_reaction(reaction)
 
     await channel.send(f"Travelers, please react to this message to cast your vote! Only {' '.join(f'<@{tid}>' for tid in traveler_ids)} can have their votes counted.")
+
+
+async def get_cheapest_cities(city_suggestions: List[Dict], channel: discord.TextChannel):
+    guild_id = channel.guild.id
+    if guild_id not in guild_travelers:
+        await channel.send("No travelers added for this trip.")
+        return
+
+    # todo dynamically set date range!!
+    date_range = {"start_month": 8, "start_year": 2025, "end_month": 9, "end_year": 2025}
+
+    # get average price per city
+    prices_by_city_by_user = {}
+    for city in city_suggestions:
+        cheapest_by_traveler = {}
+
+        # get cheapest flight for each traveler
+        for idx, traveler in guild_travelers[guild_id].items():
+            origin = traveler.origin
+            price = search_cheapest_flights(
+                origin['iata'],
+                city['closest_airport'],
+                date_range,
+                guild_api_keys[guild_id]['skyscanner_api_key']
+            )
+            cheapest_by_traveler[traveler._username] = price
+        prices_by_city_by_user[city['city_name']] = cheapest_by_traveler
+
+        ave_price = sum([int(p) for p in cheapest_by_traveler.values()]) / len(cheapest_by_traveler)
+        city['ave_price'] = ave_price
+
+    # take top 5 cheapest
+    city_suggestions.sort(key=lambda x: x['ave_price'])
+    cheapest = city_suggestions[:5]
+
+    cheapest_names = [city['city_name'] for city in cheapest]
+    top5_prices = {k:v for k,v in prices_by_city_by_user.items() if k in cheapest_names}
+    return cheapest, top5_prices
+
+
+async def ask_descriptions(suggestions: List[Dict], guild):
+    prompt = """
+        Give a brief description for a prospective traveler for each of these destinations 
+        Include the prices I'm giving you for each city as the average cost per traveler. Explicity state that it's the average flight price per traveler.
+        The message must be less than 1500 characters. Don't make any reference to the prompt you've been given.\n
+        """ + '\n'.join(["%s - %d€" % (city['city_name'], city['ave_price']) for city in suggestions])
+
+    genai_client = await get_gemini_client(guild)
+    if not genai_client:
+        return None
+
+    try:
+        response = genai_client.chats.create(model="gemini-2.0-flash").send_message(prompt)
+        return response.text
+
+    except Exception as e:
+        print(f"Error generating city descriptions for guild {guild.id}: {e}")
+        return None
+
 
 async def trigger_city_suggestion(channel: discord.TextChannel):
     guild_id = channel.guild.id
@@ -329,12 +488,25 @@ async def trigger_city_suggestion(channel: discord.TextChannel):
 
     traveler_data = guild_travelers[guild_id]
     city_suggestions = await ask_cities(traveler_data, channel.guild)
+
     if city_suggestions:
         print(f"\n--- Suggested Cities for guild {guild_id}: ---")
-        for i, city in enumerate(city_suggestions):
+        city_names = [city['city_name'] for city in city_suggestions] # json
+        for i, city in enumerate(city_names):
             print(f"{i+1}. {city}")
         print("------------------------")
-        await create_city_poll(channel, city_suggestions, list(traveler_data.keys()))
+
+        # call skyscanner and take top 5 cheapest
+        cheapest_cities, prices_by_city_by_user = await get_cheapest_cities(city_suggestions, channel)
+        print('Cheapest cities:')
+        pprint(cheapest_cities)
+
+        # give best cities description
+        descriptions = await ask_descriptions(cheapest_cities, channel.guild)
+        print('Descriptions')
+        print(descriptions)
+
+        await create_city_poll(channel, descriptions, prices_by_city_by_user, cheapest_cities, list(traveler_data.keys()))
     else:
         await channel.send("Could not generate city suggestions.")
 
@@ -368,13 +540,6 @@ async def process_votes(message: discord.RawReactionActionEvent):
             await user.send(f"You have voted for '{voted_city}' in an unknown server.")
         if len(guild_voted_users[guild_id]) == len(guild_travelers[guild_id]):
             await tally_votes(message.channel_id)
-            
-            # Send final message to the server or channel where the poll was posted
-            channel = discord_client.get_channel(message.channel_id)
-            if channel:
-                await channel.send(
-                    "🎉 All votes are in! Now the adventure begins! 🌍\n"
-                    "Start exploring flight options on Skyscanner: https://www.skyscanner.net/")
                         
 async def tally_votes(channel_id: int):
     channel = discord_client.get_channel(channel_id)
@@ -488,10 +653,17 @@ async def on_message(message):
                 await message.channel.send("Cannot add users after the trip has started. Use '!start_trip' to begin.")
 
         elif message.content.startswith('!start_trip'):
+            
             if guild_id in guild_users_to_ask and guild_users_to_ask[guild_id]:
                 guild_trip_started[guild_id] = True
                 guild_start_trip_message[guild_id] = message
-                await message.channel.send(f"Starting preference gathering from users.")
+                await message.channel.send(f"Starting to gather information for the trip!")
+                genai_client = await get_gemini_client(guild)
+                if genai_client:
+                    date_prompt = "Ask the chat when the trip should take place and output the information following this exact format: {'start_month': 8, 'start_year': 2025, 'end_month': 9, 'end_year': 2025}"
+                    response = await genai_client.chats.create(model="gemini-2.0-flash").send_message(date_prompt)
+                    await message.channel.send(f"Gemini's suggestion for the trip dates: {response}")
+                
                 first_user_id = guild_users_to_ask[guild_id][0]
                 genai_client = await get_gemini_client(guild)
                 if genai_client:
